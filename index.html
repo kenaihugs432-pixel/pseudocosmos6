@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR com WebXR — pseudocosmos (draco robust)</title>
+  <title>AR com WebXR — pseudocosmos (merged, draco + fallback)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
-    #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
-    #errorBox{position:fixed;left:10px;bottom:10px;right:10px;z-index:21;background:rgba(0,0,0,0.8);color:#fff;padding:10px;border-radius:6px;display:none;max-height:40vh;overflow:auto;font-family:monospace;font-size:13px}
+    #message{position:fixed;left:10px;top:10px;z-index:999;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
+    #errorBox{position:fixed;left:10px;bottom:10px;right:10px;z-index:999;background:rgba(0,0,0,0.8);color:#fff;padding:10px;border-radius:6px;display:none;max-height:40vh;overflow:auto;font-family:monospace;font-size:13px}
+    #hint{position:fixed;right:10px;top:10px;z-index:999;color:#fff;background:rgba(0,0,0,0.45);padding:6px;border-radius:6px}
   </style>
 
   <script type="importmap">
@@ -19,29 +20,25 @@
   }
   </script>
 
+  <!-- model-viewer para Quick Look iOS -->
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>
 <body>
   <div id="message">Iniciando…</div>
   <div id="errorBox"></div>
+  <div id="hint">Abra o console remoto do navegador para ver logs</div>
 
   <script type="module">
   (async () => {
-    const showError = txt => {
-      const box = document.getElementById('errorBox');
-      box.style.display = 'block';
-      box.textContent += txt + "\n\n";
-      console.error(txt);
-    };
-    const setMessage = m => document.getElementById('message').textContent = m;
+    const $ = id => document.getElementById(id);
+    const showError = txt => { const box = $('errorBox'); box.style.display='block'; box.textContent += txt + "\n\n"; console.error(txt); };
+    const setMessage = m => $('message').textContent = m;
 
-    // quick HEAD check do GLB
+    // quick HEAD check do GLB (troque neuron.glb se seu arquivo tiver outro nome)
     try {
       const head = await fetch('neuron.glb', { method: 'HEAD' });
-      if (!head.ok) { showError('neuron.glb não encontrado (HTTP ' + head.status + ')'); setMessage('neuron.glb não encontrado. Abra fallback.'); return; }
-    } catch (e) {
-      showError('Erro checando neuron.glb: ' + e); return;
-    }
+      if (!head.ok) { showError('neuron.glb não encontrado (HTTP ' + head.status + ')'); setMessage('neuron.glb não encontrado. Abra fallback.'); /* continua pra debug */ }
+    } catch (e) { console.warn('Erro checando neuron.glb (continuando):', e); }
 
     // importar libs principais
     let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
@@ -52,28 +49,21 @@
       SkeletonUtilsModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/utils/SkeletonUtils.js');
     } catch (err) {
       showError('Falha ao carregar libs via CDN/importmap: ' + err);
-      setMessage('Erro carregando libs. Abra fallback.');
       return;
     }
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
-
-    // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
-    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) {
-      console.warn('SkeletonUtils não exportado na forma esperada — fallback para clone simples (isso pode impedir animações skinned em alguns modelos).');
-      SkeletonUtils = null;
-    }
+    if (!SkeletonUtils || (typeof SkeletonUtils.clone !== 'function')) { console.warn('SkeletonUtils: fallback'); SkeletonUtils = null; }
 
     // renderer
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
-    // compat APIs antigas/novas
+    try { renderer.xr.setReferenceSpaceType && renderer.xr.setReferenceSpaceType('local-floor'); } catch(e){}
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
-    if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.4;
     document.body.appendChild(renderer.domElement);
@@ -86,12 +76,19 @@
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(1,2,1); scene.add(dir);
 
-    // reticle
+    // reticle (ring)
     const ring = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
-    const reticle = new THREE.Mesh(ring, ringMat); reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest:false, depthWrite:false, transparent:true, opacity:0.95 });
+    const reticle = new THREE.Mesh(ring, ringMat);
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    // garantir transform props para decompor quando receber matrix
+    reticle.position.set(0,0,0);
+    reticle.quaternion.set(0,0,0,1);
+    reticle.scale.set(1,1,1);
+    scene.add(reticle);
 
-    // PMREM + env
+    // PMREM + environment map (opcional)
     const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
     try {
       const tl = new THREE.TextureLoader();
@@ -106,67 +103,40 @@
       console.log('Environment aplicado');
     } catch(e) { console.warn('Env falhou (não crítico):', e); }
 
-    // GLTF loader
+    // GLTF loader e DRACO robusto
     const loader = new GLTFLoader();
-
-    // ------------------------------------------------------------
-    // SETUP DRACO ROBUSTO (import dinâmico + preload + setDRACOLoader)
-    // ------------------------------------------------------------
     try {
+      // tenta importar DRACOLoader dinamicamente (vários fallbacks)
       let DRACOLoaderModule = null;
-      try {
-        // tenta importar DRACOLoader diretamente — reduz chances de mismatch
-        DRACOLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/DRACOLoader.js');
-      } catch (e) {
-        console.warn('Import DRACOLoader via jsdelivr falhou, tentando fallback via unpkg...', e);
-        try { DRACOLoaderModule = await import('https://unpkg.com/three@0.154.0/examples/jsm/loaders/DRACOLoader.js'); }
-        catch (e2) { console.warn('Fallback unpkg DRACOLoader também falhou:', e2); }
-      }
+      try { DRACOLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/DRACOLoader.js'); }
+      catch(e){ try { DRACOLoaderModule = await import('https://unpkg.com/three@0.154.0/examples/jsm/loaders/DRACOLoader.js'); } catch(e2){ DRACOLoaderModule = null; } }
+      const DRACOLoaderClass = DRACOLoaderModule && (DRACOLoaderModule.DRACOLoader || DRACOLoaderModule.default || DRACOLoaderModule);
+      if (DRACOLoaderClass) {
+        const dracoLoader = new DRACOLoaderClass();
+        dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+        if (typeof dracoLoader.setDecoderConfig === 'function') try { dracoLoader.setDecoderConfig({ type: 'wasm' }); } catch(e){}
+        if (typeof dracoLoader.preload === 'function') dracoLoader.preload();
+        if (typeof loader.setDRACOLoader === 'function') { loader.setDRACOLoader(dracoLoader); console.log('DRACOLoader aplicado.'); }
+        else console.warn('GLTFLoader.setDRACOLoader não disponível.');
+      } else console.log('DRACOLoader não encontrado — pulando (espera-se .glb sem Draco).');
+    } catch(e){ console.warn('Erro no setup DRACO:', e); }
 
-      let DRACOLoaderClass = DRACOLoaderModule && (DRACOLoaderModule.DRACOLoader || DRACOLoaderModule.default || DRACOLoaderModule);
-      if (!DRACOLoaderClass) {
-        console.warn('DRACOLoaderClass não encontrado no módulo importado — DRACO não será usado (espera-se GLB sem Draco).');
-      } else {
-        try {
-          const dracoLoader = new DRACOLoaderClass();
-          // use o decoder path do Google (CORS ok). Você pode hospedar localmente se preferir.
-          dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
-          // preferir wasm se possível
-          if (typeof dracoLoader.setDecoderConfig === 'function') {
-            try { dracoLoader.setDecoderConfig({ type: 'wasm' }); } catch(e) {}
-          }
-          // preload garante que o decoder (wasm/js) seja obtido antes do parse
-          if (typeof dracoLoader.preload === 'function') dracoLoader.preload();
-          // associe ao GLTFLoader
-          if (typeof loader.setDRACOLoader === 'function') {
-            loader.setDRACOLoader(dracoLoader);
-            console.log('DRACOLoader configurado e aplicado ao GLTFLoader (decoder path: https://www.gstatic.com/draco/v1/decoders/).');
-          } else {
-            console.warn('GLTFLoader.setDRACOLoader não disponível — versão incompatível do GLTFLoader?');
-          }
-        } catch (e) {
-          console.warn('Erro instanciando DRACOLoader — prosseguindo sem Draco:', e);
-        }
-      }
-    } catch (e) {
-      console.warn('Erro no bloco de setup do DRACO:', e);
-    }
-    // ------------------------------------------------------------
-    // fim setup DRACO
-    // ------------------------------------------------------------
-
+    // variáveis de estado
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
-    // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
+    const mixers = [];
+    const clock = new THREE.Clock();
 
+    // carregar GLTF
     loader.load('neuron.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
+      // ajuste de scale default (se quiser alterar)
       modelPrototype.scale.set(0.5,0.5,0.5);
 
-      // safe material fallbacks pra debug/visibilidade
+      // material fallbacks
       modelPrototype.traverse(n => {
         if (n.isMesh && n.material) {
           n.material.side = THREE.DoubleSide;
@@ -183,82 +153,99 @@
         }
       });
 
-      console.log('Modelo carregado — animações:', (gltf.animations && gltf.animations.length) || 0);
+      console.log('Modelo carregado — animações:', (gltf.animations && gltf.animations.length) || 0, gltf.animations && gltf.animations.map(a=>a.name));
       modelReady = true;
-      setMessage('Modelo carregado. Clique em \"START AR\" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
+      setMessage('Modelo carregado. Abra AR e aponte para o anel verde (ou use o reticle fallback).');
     }, undefined, (err) => {
       showError('Erro carregando neuron.glb: ' + err);
     });
 
     // AR button / iOS Quick Look fallback
     const usdzUrl = new URL('neuron.usdz', location.href).href;
-
-    function isIOS() {
-      return /iP(hone|od|ad)/.test(navigator.platform)
-        || (navigator.userAgent.includes("Mac") && "ontouchend" in document);
-    }
+    function isIOS() { return /iP(hone|od|ad)/.test(navigator.platform) || (navigator.userAgent.includes('Mac') && 'ontouchend' in document); }
 
     if (isIOS()) {
       const arLink = document.createElement('a');
-      arLink.href = usdzUrl;
-      arLink.setAttribute('rel', 'ar');
-      arLink.style.position = 'fixed';
-      arLink.style.left = '10px';
-      arLink.style.bottom = '10px';
-      arLink.style.zIndex = '40';
-      arLink.style.padding = '10px 14px';
-      arLink.style.background = '#0b84ff';
-      arLink.style.color = '#fff';
-      arLink.style.borderRadius = '8px';
-      arLink.style.textDecoration = 'none';
+      arLink.href = usdzUrl; arLink.setAttribute('rel','ar');
+      Object.assign(arLink.style, {position:'fixed',left:'10px',bottom:'10px',zIndex:999,padding:'10px 14px',background:'#0b84ff',color:'#fff',borderRadius:'8px',textDecoration:'none'});
       arLink.textContent = 'Abrir AR (iOS Quick Look)';
       document.body.appendChild(arLink);
 
+      // mini-preview com model-viewer
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src', 'neuron.glb');    // mantém seu GLB para preview web
-      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
-      mv.setAttribute('ar', '');
-      mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
-      mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
-      mv.setAttribute('camera-controls', '');
+      mv.setAttribute('src','neuron.glb');
+      mv.setAttribute('ios-src', usdzUrl);
+      mv.setAttribute('ar','');
+      mv.setAttribute('ar-modes','webxr quick-look scene-viewer');
+      mv.setAttribute('style','position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:998;border-radius:8px;overflow:hidden;');
+      mv.setAttribute('camera-controls','');
       document.body.appendChild(mv);
 
-      setMessage('iOS detectado — toque \"Abrir AR (iOS Quick Look)\" para ver em AR nativo.');
+      setMessage('iOS detectado — use Quick Look ou WebXR conforme disponível.');
     } else {
       try { document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })); }
       catch(e) { showError('Erro criando botão AR: ' + e); }
     }
 
-    // mixers e clock (se seu modelo não tem animações, estes não fazem nada)
-    const mixers = [];
-    const clock = new THREE.Clock();
+    // hit-test + fallback logic (sem remover nada importante)
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+    let fallbackMode = false;
 
-    // handler seletor (apenas quando modelReady)
+    renderer.xr.addEventListener('sessionstart', async () => {
+      const session = renderer.xr.getSession();
+      if (!session) return;
+      try {
+        session._localRefSpace = await session.requestReferenceSpace('local-floor').catch(()=>null);
+        if (!session._localRefSpace) session._localRefSpace = renderer.xr.getReferenceSpace();
+        console.log('session._localRefSpace ready:', !!session._localRefSpace);
+      } catch(e) {
+        console.warn('sessionstart local-floor erro:', e);
+        session._localRefSpace = renderer.xr.getReferenceSpace();
+      }
+    });
+
+    function requestHitTest(session) {
+      if (!session || hitTestSourceRequested) return;
+      hitTestSourceRequested = true;
+      session.requestReferenceSpace('viewer').then(viewerSpace => {
+        session.requestHitTestSource({ space: viewerSpace }).then(src => {
+          hitTestSource = src;
+          console.log('Hit test source criado');
+        }).catch(e => console.warn('requestHitTestSource failed', e));
+      }).catch(e => console.warn('requestReferenceSpace failed', e));
+    }
+
+    // controller (colocar modelo)
     const controller = renderer.xr.getController(0);
     controller.addEventListener('select', () => {
       if (!modelReady) { setMessage('Modelo ainda carregando — aguarde.'); console.warn('Select ignorado: modelo não pronto'); return; }
-      if (!reticle.visible) { setMessage('Aponte a câmera até o anel aparecer.'); return; }
+      if (!reticle.visible) { console.warn('Reticle invisível, usando fallback'); }
 
       try {
         if (placedModel) {
-          // já existe um modelo colocado: apenas reposiciona/rotaciona
-          placedModel.position.setFromMatrixPosition(reticle.matrix);
-          placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
+          // reposiciona usando position/quaternion do reticle (mais seguro)
+          placedModel.position.copy(reticle.position);
+          placedModel.quaternion.copy(reticle.quaternion);
+          placedModel.scale.copy(reticle.scale);
+          placedModel.updateMatrixWorld(true);
           console.log('Modelo existente reposicionado.');
           return;
         }
 
         const clone = (SkeletonUtils ? SkeletonUtils.clone(modelPrototype) : modelPrototype.clone(true));
-        clone.position.setFromMatrixPosition(reticle.matrix);
-        clone.quaternion.setFromRotationMatrix(reticle.matrix);
+        clone.position.copy(reticle.position);
+        clone.quaternion.copy(reticle.quaternion);
+        clone.scale.copy(reticle.scale);
         scene.add(clone);
-        placedModel = clone; // guarda a referência — garante apenas 1 instância
+        placedModel = clone;
 
+        // se houver animações, adiciona mixer
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
           baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
           mixers.push(m);
-          console.log('Clone adicionado e animação iniciada (mixers=', mixers.length, ')');
+          console.log('Animações iniciadas (mixers=', mixers.length, ')');
         } else console.log('Clone adicionado (sem animações).');
       } catch (e) {
         showError('Falha ao clonar/colocar modelo: ' + e);
@@ -266,7 +253,22 @@
     });
     scene.add(controller);
 
-    // loop + hit-test
+    // also allow click (non-XR) to place fallback
+    window.addEventListener('click', (ev) => {
+      if (!renderer.xr.isPresenting) {
+        // coloca reticle 1.5m à frente e insere
+        const camForward = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+        const pos = new THREE.Vector3().copy(camera.position).add(camForward.multiplyScalar(1.5));
+        const m = new THREE.Matrix4().compose(pos, camera.quaternion, new THREE.Vector3(1,1,1));
+        reticle.matrix.copy(m);
+        reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
+        reticle.visible = true;
+        // tenta colocar (se modelo carregado)
+        try { controller.dispatchEvent({ type: 'select' }); } catch(e){}
+      }
+    });
+
+    // render loop
     const tmp = new THREE.Matrix4();
     renderer.setAnimationLoop((timestamp, frame) => {
       const delta = clock.getDelta();
@@ -274,37 +276,64 @@
 
       if (frame) {
         const session = renderer.xr.getSession();
-        const referenceSpace = renderer.xr.getReferenceSpace();
-        if (session && !session._hitTestSourceRequested) {
-          session._hitTestSourceRequested = true;
-          session.requestReferenceSpace('viewer').then(viewerSpace => {
-            session.requestHitTestSource({ space: viewerSpace }).then(src => session._hitTestSource = src)
-              .catch(e => console.warn('requestHitTestSource failed', e));
-          }).catch(e => console.warn('requestReferenceSpace failed', e));
-        }
-        const ht = session && session._hitTestSource;
-        if (ht) {
-          const results = frame.getHitTestResults(ht);
+        if (session && !hitTestSourceRequested) requestHitTest(session);
+
+        const refSpace = (session && session._localRefSpace) ? session._localRefSpace : renderer.xr.getReferenceSpace();
+
+        if (hitTestSource) {
+          const results = frame.getHitTestResults(hitTestSource);
           if (results.length > 0) {
             const hit = results[0];
-            const pose = hit.getPose(referenceSpace);
+            const pose = hit.getPose(refSpace);
             if (pose) {
               tmp.fromArray(pose.transform.matrix);
               reticle.matrix.copy(tmp);
+              reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
               reticle.visible = true;
-            } else reticle.visible = false;
-          } else reticle.visible = false;
+              fallbackMode = false;
+            } else {
+              // sem pose -> fallback
+              reticle.visible = false;
+              fallbackMode = true;
+            }
+          } else {
+            // sem resultados -> fallback
+            reticle.visible = false;
+            fallbackMode = true;
+          }
+        } else {
+          // sem hitTestSource -> fallback
+          fallbackMode = true;
         }
+
+        if (fallbackMode) {
+          // reticle 1.5m em frente à câmera (útil para testar)
+          const camWorldPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+          const camForward = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+          const fallbackPos = camWorldPos.clone().add(camForward.multiplyScalar(1.5));
+          const m = new THREE.Matrix4().compose(fallbackPos, camera.quaternion.clone(), new THREE.Vector3(1,1,1));
+          reticle.matrix.copy(m);
+          reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
+          reticle.visible = true;
+        }
+      } else {
+        // fora de XR: reticle é manipulado via clique para teste
       }
 
       renderer.render(scene, camera);
     });
 
+    // expose debug helpers
+    window.__ar_debug = { hitTestSource: () => hitTestSource, fallbackMode: () => fallbackMode, placedModel: () => placedModel };
+
+    // resize handler
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth/window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
+
+    setMessage('Pronto — teste em HTTPS no celular. Se o reticle não aparecer, o fallback mostrará um círculo a 1.5m para teste.');
 
   })();
   </script>
