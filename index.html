@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AR com WebXR — pseudocosmos (draco fixed)</title>
+  <title>AR com WebXR — pseudocosmos (draco robust)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
     #message{position:fixed;left:10px;top:10px;z-index:20;background:#fff;color:#000;padding:8px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);max-width:calc(100% - 24px)}
@@ -43,32 +43,20 @@
       showError('Erro checando neuron.glb: ' + e); return;
     }
 
-    // importar libs
-    let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule, DRACOLoaderModule;
+    // importar libs principais
+    let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
     try {
       THREE = await import('three');
       GLTFLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/GLTFLoader.js');
       ARButtonModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/webxr/ARButton.js');
       SkeletonUtilsModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/utils/SkeletonUtils.js');
-      // import DRACOLoader module (pode exportar como nomeado ou default)
-      DRACOLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/DRACOLoader.js');
     } catch (err) {
       showError('Falha ao carregar libs via CDN/importmap: ' + err);
       setMessage('Erro carregando libs. Abra fallback.');
       return;
     }
-
     const { GLTFLoader } = GLTFLoaderModule;
     const { ARButton } = ARButtonModule;
-
-    // tentativa robusta de obter a classe DRACOLoader do módulo
-    let DRACOLoaderClass = null;
-    if (DRACOLoaderModule) {
-      DRACOLoaderClass = DRACOLoaderModule.DRACOLoader || DRACOLoaderModule.default || DRACOLoaderModule;
-    }
-    if (!DRACOLoaderClass) {
-      console.warn('DRACOLoader não encontrado no módulo importado — DRACO não será usado.');
-    }
 
     // detectar export do SkeletonUtils de forma robusta:
     let SkeletonUtils = SkeletonUtilsModule.SkeletonUtils || SkeletonUtilsModule.default || SkeletonUtilsModule;
@@ -82,6 +70,7 @@
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
+    // compat APIs antigas/novas
     if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     else if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
     if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
@@ -102,7 +91,7 @@
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
     const reticle = new THREE.Mesh(ring, ringMat); reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
 
-    // PMREM + env (opcional)
+    // PMREM + env
     const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
     try {
       const tl = new THREE.TextureLoader();
@@ -120,32 +109,56 @@
     // GLTF loader
     const loader = new GLTFLoader();
 
-    // CONFIGURAÇÃO ROBUSTA DO DRACO
-    if (DRACOLoaderClass) {
+    // ------------------------------------------------------------
+    // SETUP DRACO ROBUSTO (import dinâmico + preload + setDRACOLoader)
+    // ------------------------------------------------------------
+    try {
+      let DRACOLoaderModule = null;
       try {
-        // algumas builds exportam a classe como função/objeto, por isso usamos como constructor
-        const dracoLoader = new DRACOLoaderClass();
-        // indicar onde estão os decodificadores wasm/js. O path do Google é confiável e CORS-friendly.
-        dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
-        // preferir wasm se disponível
-        if (typeof dracoLoader.setDecoderConfig === 'function') {
-          try { dracoLoader.setDecoderConfig({ type: 'wasm' }); } catch(e) { /* ok */ }
-        }
-        // setar no gltf loader
-        if (typeof loader.setDRACOLoader === 'function') {
-          loader.setDRACOLoader(dracoLoader);
-          console.log('DRACOLoader aplicado ao GLTFLoader (decoder path set).');
-        } else {
-          console.warn('GLTFLoader.setDRACOLoader não disponível nesta versão — DRACO pode não funcionar.');
-        }
+        // tenta importar DRACOLoader diretamente — reduz chances de mismatch
+        DRACOLoaderModule = await import('https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/DRACOLoader.js');
       } catch (e) {
-        console.warn('Falha ao instanciar DRACOLoader — prosseguindo sem DRACO:', e);
+        console.warn('Import DRACOLoader via jsdelivr falhou, tentando fallback via unpkg...', e);
+        try { DRACOLoaderModule = await import('https://unpkg.com/three@0.154.0/examples/jsm/loaders/DRACOLoader.js'); }
+        catch (e2) { console.warn('Fallback unpkg DRACOLoader também falhou:', e2); }
       }
+
+      let DRACOLoaderClass = DRACOLoaderModule && (DRACOLoaderModule.DRACOLoader || DRACOLoaderModule.default || DRACOLoaderModule);
+      if (!DRACOLoaderClass) {
+        console.warn('DRACOLoaderClass não encontrado no módulo importado — DRACO não será usado (espera-se GLB sem Draco).');
+      } else {
+        try {
+          const dracoLoader = new DRACOLoaderClass();
+          // use o decoder path do Google (CORS ok). Você pode hospedar localmente se preferir.
+          dracoLoader.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+          // preferir wasm se possível
+          if (typeof dracoLoader.setDecoderConfig === 'function') {
+            try { dracoLoader.setDecoderConfig({ type: 'wasm' }); } catch(e) {}
+          }
+          // preload garante que o decoder (wasm/js) seja obtido antes do parse
+          if (typeof dracoLoader.preload === 'function') dracoLoader.preload();
+          // associe ao GLTFLoader
+          if (typeof loader.setDRACOLoader === 'function') {
+            loader.setDRACOLoader(dracoLoader);
+            console.log('DRACOLoader configurado e aplicado ao GLTFLoader (decoder path: https://www.gstatic.com/draco/v1/decoders/).');
+          } else {
+            console.warn('GLTFLoader.setDRACOLoader não disponível — versão incompatível do GLTFLoader?');
+          }
+        } catch (e) {
+          console.warn('Erro instanciando DRACOLoader — prosseguindo sem Draco:', e);
+        }
+      }
+    } catch (e) {
+      console.warn('Erro no bloco de setup do DRACO:', e);
     }
+    // ------------------------------------------------------------
+    // fim setup DRACO
+    // ------------------------------------------------------------
 
     let baseGLTF = null;
     let modelPrototype = null;
     let modelReady = false;
+    // variável que guarda o modelo colocado (garante apenas 1)
     let placedModel = null;
 
     loader.load('neuron.glb', (gltf) => {
@@ -153,6 +166,7 @@
       modelPrototype = gltf.scene;
       modelPrototype.scale.set(0.5,0.5,0.5);
 
+      // safe material fallbacks pra debug/visibilidade
       modelPrototype.traverse(n => {
         if (n.isMesh && n.material) {
           n.material.side = THREE.DoubleSide;
@@ -171,17 +185,19 @@
 
       console.log('Modelo carregado — animações:', (gltf.animations && gltf.animations.length) || 0);
       modelReady = true;
-      setMessage('Modelo carregado. Clique em \"START AR\" para iniciar AR. Aponte para o anel e toque para posicionar.');
+      setMessage('Modelo carregado. Clique em \"START AR\" para dar início à realidade aumentada. Aponte a câmera para o anel verde e toque para posicionar.');
     }, undefined, (err) => {
       showError('Erro carregando neuron.glb: ' + err);
     });
 
     // AR button / iOS Quick Look fallback
     const usdzUrl = new URL('neuron.usdz', location.href).href;
+
     function isIOS() {
       return /iP(hone|od|ad)/.test(navigator.platform)
-        || (navigator.userAgent.includes(\"Mac\") && \"ontouchend\" in document);
+        || (navigator.userAgent.includes("Mac") && "ontouchend" in document);
     }
+
     if (isIOS()) {
       const arLink = document.createElement('a');
       arLink.href = usdzUrl;
@@ -199,8 +215,8 @@
       document.body.appendChild(arLink);
 
       const mv = document.createElement('model-viewer');
-      mv.setAttribute('src', 'neuron.glb');
-      mv.setAttribute('ios-src', usdzUrl);
+      mv.setAttribute('src', 'neuron.glb');    // mantém seu GLB para preview web
+      mv.setAttribute('ios-src', usdzUrl);  // fonte para Quick Look
       mv.setAttribute('ar', '');
       mv.setAttribute('ar-modes', 'webxr quick-look scene-viewer');
       mv.setAttribute('style', 'position:fixed;right:10px;bottom:10px;width:120px;height:120px;z-index:39;border-radius:8px;overflow:hidden;');
@@ -225,6 +241,7 @@
 
       try {
         if (placedModel) {
+          // já existe um modelo colocado: apenas reposiciona/rotaciona
           placedModel.position.setFromMatrixPosition(reticle.matrix);
           placedModel.quaternion.setFromRotationMatrix(reticle.matrix);
           console.log('Modelo existente reposicionado.');
@@ -235,9 +252,8 @@
         clone.position.setFromMatrixPosition(reticle.matrix);
         clone.quaternion.setFromRotationMatrix(reticle.matrix);
         scene.add(clone);
-        placedModel = clone;
+        placedModel = clone; // guarda a referência — garante apenas 1 instância
 
-        // animações (se existirem)
         if (baseGLTF && baseGLTF.animations && baseGLTF.animations.length) {
           const m = new THREE.AnimationMixer(clone);
           baseGLTF.animations.forEach(clip => m.clipAction(clip).play());
@@ -294,4 +310,3 @@
   </script>
 </body>
 </html>
-
